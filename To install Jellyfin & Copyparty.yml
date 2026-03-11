@@ -8,7 +8,7 @@ echo -e "\e[1;36m====================================================\e[0m\n"
 pkg update -y && pkg upgrade -y && pkg install tur-repo -y && pkg update -y
 
 # 2. Install required packages (Dotnet SDK, Python, and Network tools)
-pkg install dotnet-sdk python iproute2 procps nano -y
+pkg install dotnet-10.0 dotnet-sdk-10.0 python iproute2 procps nano -y
 
 # 3. Automated storage setup (bypasses y/n prompt for internal storage access)
 echo "y" | termux-setup-storage
