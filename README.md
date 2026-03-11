@@ -9,6 +9,7 @@ Inside termux setup SSH - [Here is how](https://github.com/YasinSuzon/Termux-Com
 
 Use SSH from PC to connect to your android device. Then use the install command.
 
+
 **After Installation**
 - Create 'Movies/Music' folders via Copyparty
 - Add those folder as Library on Jellyfin
