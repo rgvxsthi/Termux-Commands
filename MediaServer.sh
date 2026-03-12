@@ -1,16 +1,21 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 PREFIX="/data/data/com.termux/files/usr"
+
+APP_DIR="$HOME/.media-stack"
+LOG_DIR="$APP_DIR/logs"
+CONFIG_FILE="$APP_DIR/config.env"
+
+START_SCRIPT="$APP_DIR/start-services.sh"
+STOP_SCRIPT="$APP_DIR/stop-services.sh"
+
 BOOT_DIR="$HOME/.termux/boot"
 BOOT_SCRIPT="$BOOT_DIR/start-services.sh"
-STOP_SCRIPT="$BOOT_DIR/stop-services.sh"
-CONFIG_DIR="$HOME/.media-stack"
-CONFIG_FILE="$CONFIG_DIR/config.env"
 
 DEFAULT_JELLYFIN_PORT="8096"
 DEFAULT_COPYPARTY_PORT="3923"
 
-mkdir -p "$CONFIG_DIR"
+mkdir -p "$APP_DIR" "$LOG_DIR"
 
 if [ ! -f "$CONFIG_FILE" ]; then
   cat > "$CONFIG_FILE" <<EOF
@@ -74,9 +79,10 @@ error_msg() {
 }
 
 get_ip() {
-  MY_IP=$(ifconfig 2>/dev/null | awk '/inet / && $2 != "127.0.0.1" {print $2; exit}')
-  [ -z "$MY_IP" ] && MY_IP="127.0.0.1"
-  echo "$MY_IP"
+  local my_ip
+  my_ip=$(ifconfig 2>/dev/null | awk '/inet / && $2 != "127.0.0.1" {print $2; exit}')
+  [ -z "$my_ip" ] && my_ip="127.0.0.1"
+  echo "$my_ip"
 }
 
 pkg_installed() {
@@ -147,14 +153,18 @@ ensure_base_packages() {
   ensure_path_local_bin
 }
 
-write_service_scripts() {
-  mkdir -p "$BOOT_DIR"
+write_runtime_scripts() {
+  mkdir -p "$APP_DIR" "$LOG_DIR"
 
-  cat > "$BOOT_SCRIPT" <<EOF
+  cat > "$START_SCRIPT" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 
 PREFIX="/data/data/com.termux/files/usr"
-CONFIG_FILE="\$HOME/.media-stack/config.env"
+APP_DIR="\$HOME/.media-stack"
+LOG_DIR="\$APP_DIR/logs"
+CONFIG_FILE="\$APP_DIR/config.env"
+
+mkdir -p "\$APP_DIR" "\$LOG_DIR"
 
 [ -f "\$CONFIG_FILE" ] && . "\$CONFIG_FILE"
 
@@ -171,7 +181,7 @@ pkill -9 -f 'python.*copyparty|copyparty' 2>/dev/null || true
 sleep 2
 
 if dpkg-query -W -f='\\\${db:Status-Status}\\n' jellyfin-server 2>/dev/null | grep -qx installed; then
-  nohup jellyfin --ffmpeg "\$(command -v ffmpeg)" >/dev/null 2>&1 &
+  nohup jellyfin --ffmpeg "\$(command -v ffmpeg)" > "\$LOG_DIR/jellyfin.log" 2>&1 &
 fi
 
 sleep 8
@@ -182,7 +192,7 @@ if python -m pip show copyparty >/dev/null 2>&1; then
     -v "\$COPYPARTY_VOLUME" \
     -a "\$COPYPARTY_USER:\$COPYPARTY_PASS" \
     -e2dsa \
-    >/dev/null 2>&1 &
+    > "\$LOG_DIR/copyparty.log" 2>&1 &
 fi
 EOF
 
@@ -193,7 +203,29 @@ pkill -9 -f 'python.*copyparty|copyparty' 2>/dev/null || true
 sleep 1
 EOF
 
-  chmod +x "$BOOT_SCRIPT" "$STOP_SCRIPT"
+  chmod +x "$START_SCRIPT" "$STOP_SCRIPT"
+}
+
+write_boot_script() {
+  mkdir -p "$BOOT_DIR"
+  cat > "$BOOT_SCRIPT" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+nohup bash "$START_SCRIPT" > "$LOG_DIR/boot-start.log" 2>&1 &
+EOF
+  chmod +x "$BOOT_SCRIPT"
+}
+
+remove_boot_script() {
+  rm -f "$BOOT_SCRIPT"
+}
+
+sync_boot_script_state() {
+  write_runtime_scripts
+  if [ "$AUTOSTART_ENABLED" = "1" ]; then
+    write_boot_script
+  else
+    remove_boot_script
+  fi
 }
 
 stop_all_services() {
@@ -207,24 +239,24 @@ stop_all_services() {
 }
 
 start_installed_services() {
-  write_service_scripts
-  bash "$BOOT_SCRIPT"
+  sync_boot_script_state
+  nohup bash "$START_SCRIPT" > "$LOG_DIR/startup.log" 2>&1 &
   sleep 5
 }
 
 show_main_status() {
-  local IP JF_PORT CP_PORT
-  IP=$(get_ip)
-  JF_PORT=$(get_jellyfin_port)
-  CP_PORT=$(get_copyparty_port)
+  local ip jf_port cp_port
+  ip=$(get_ip)
+  jf_port=$(get_jellyfin_port)
+  cp_port=$(get_copyparty_port)
 
-  echo -e "${WHITE}Current IP:${NC} ${GREEN}$IP${NC}"
+  echo -e "${WHITE}Current IP:${NC} ${GREEN}$ip${NC}"
   echo
 
   if jellyfin_installed; then
-    if [ -n "$JF_PORT" ]; then
-      echo -e "${WHITE}Jellyfin:${NC}   ${GREEN}RUNNING${NC} on port ${YELLOW}$JF_PORT${NC}"
-      echo -e "${WHITE}           URL:${NC} ${CYAN}http://$IP:$JF_PORT${NC}"
+    if [ -n "$jf_port" ]; then
+      echo -e "${WHITE}Jellyfin:${NC}   ${GREEN}RUNNING${NC} on port ${YELLOW}$jf_port${NC}"
+      echo -e "${WHITE}           URL:${NC} ${CYAN}http://$ip:$jf_port${NC}"
     else
       echo -e "${WHITE}Jellyfin:${NC}   ${YELLOW}INSTALLED${NC} but ${RED}STOPPED${NC}"
     fi
@@ -235,9 +267,9 @@ show_main_status() {
   echo
 
   if copyparty_installed; then
-    if [ -n "$CP_PORT" ]; then
-      echo -e "${WHITE}Copyparty:${NC}  ${GREEN}RUNNING${NC} on port ${YELLOW}$CP_PORT${NC}"
-      echo -e "${WHITE}           URL:${NC} ${CYAN}http://$IP:$CP_PORT${NC}"
+    if [ -n "$cp_port" ]; then
+      echo -e "${WHITE}Copyparty:${NC}  ${GREEN}RUNNING${NC} on port ${YELLOW}$cp_port${NC}"
+      echo -e "${WHITE}           URL:${NC} ${CYAN}http://$ip:$cp_port${NC}"
       echo -e "${WHITE}         Login:${NC} ${YELLOW}$COPYPARTY_USER / $COPYPARTY_PASS${NC}"
     else
       echo -e "${WHITE}Copyparty:${NC}  ${YELLOW}INSTALLED${NC} but ${RED}STOPPED${NC}"
@@ -248,8 +280,9 @@ show_main_status() {
 
   echo
 
-  if [ "$AUTOSTART_ENABLED" = "1" ]; then
+  if [ "$AUTOSTART_ENABLED" = "1" ] && [ -f "$BOOT_SCRIPT" ]; then
     echo -e "${WHITE}Background Autostart:${NC} ${GREEN}ENABLED${NC}"
+    echo -e "${WHITE}Boot Script:${NC}          ${CYAN}$BOOT_SCRIPT${NC}"
   else
     echo -e "${WHITE}Background Autostart:${NC} ${RED}DISABLED${NC}"
   fi
@@ -258,17 +291,17 @@ show_main_status() {
 }
 
 show_jellyfin_status() {
-  local IP JF_PORT
-  IP=$(get_ip)
-  JF_PORT=$(get_jellyfin_port)
+  local ip jf_port
+  ip=$(get_ip)
+  jf_port=$(get_jellyfin_port)
 
   echo -e "${CYAN}---------------- Jellyfin Status ----------------${NC}"
   if jellyfin_installed; then
     echo -e "${WHITE}Installed:${NC} ${GREEN}Yes${NC}"
-    if [ -n "$JF_PORT" ]; then
+    if [ -n "$jf_port" ]; then
       echo -e "${WHITE}Running:${NC}   ${GREEN}Yes${NC}"
-      echo -e "${WHITE}Port:${NC}      ${YELLOW}$JF_PORT${NC}"
-      echo -e "${WHITE}URL:${NC}       ${CYAN}http://$IP:$JF_PORT${NC}"
+      echo -e "${WHITE}Port:${NC}      ${YELLOW}$jf_port${NC}"
+      echo -e "${WHITE}URL:${NC}       ${CYAN}http://$ip:$jf_port${NC}"
     else
       echo -e "${WHITE}Running:${NC}   ${RED}No${NC}"
       echo -e "${WHITE}Port:${NC}      ${DIM}N/A${NC}"
@@ -284,17 +317,17 @@ show_jellyfin_status() {
 }
 
 show_copyparty_status() {
-  local IP CP_PORT
-  IP=$(get_ip)
-  CP_PORT=$(get_copyparty_port)
+  local ip cp_port
+  ip=$(get_ip)
+  cp_port=$(get_copyparty_port)
 
   echo -e "${CYAN}--------------- Copyparty Status ----------------${NC}"
   if copyparty_installed; then
     echo -e "${WHITE}Installed:${NC} ${GREEN}Yes${NC}"
-    if [ -n "$CP_PORT" ]; then
+    if [ -n "$cp_port" ]; then
       echo -e "${WHITE}Running:${NC}   ${GREEN}Yes${NC}"
-      echo -e "${WHITE}Port:${NC}      ${YELLOW}$CP_PORT${NC}"
-      echo -e "${WHITE}URL:${NC}       ${CYAN}http://$IP:$CP_PORT${NC}"
+      echo -e "${WHITE}Port:${NC}      ${YELLOW}$cp_port${NC}"
+      echo -e "${WHITE}URL:${NC}       ${CYAN}http://$ip:$cp_port${NC}"
       echo -e "${WHITE}Login:${NC}     ${YELLOW}$COPYPARTY_USER / $COPYPARTY_PASS${NC}"
     else
       echo -e "${WHITE}Running:${NC}   ${RED}No${NC}"
@@ -311,6 +344,29 @@ show_copyparty_status() {
   echo
 }
 
+show_logs_menu() {
+  while true; do
+    print_banner
+    echo -e "${CYAN}------------------ Service Logs ------------------${NC}"
+    echo -e "${WHITE}1)${NC} Jellyfin log"
+    echo -e "${WHITE}2)${NC} Copyparty log"
+    echo -e "${WHITE}3)${NC} Startup log"
+    echo -e "${WHITE}4)${NC} Boot start log"
+    echo -e "${WHITE}5)${NC} Back"
+    echo
+    read -r -p "$(echo -e "${MAGENTA}Select option: ${NC}")" choice
+
+    case "$choice" in
+      1) print_banner; [ -f "$LOG_DIR/jellyfin.log" ] && tail -n 100 "$LOG_DIR/jellyfin.log" || warn "No Jellyfin log found."; pause ;;
+      2) print_banner; [ -f "$LOG_DIR/copyparty.log" ] && tail -n 100 "$LOG_DIR/copyparty.log" || warn "No Copyparty log found."; pause ;;
+      3) print_banner; [ -f "$LOG_DIR/startup.log" ] && tail -n 100 "$LOG_DIR/startup.log" || warn "No startup log found."; pause ;;
+      4) print_banner; [ -f "$LOG_DIR/boot-start.log" ] && tail -n 100 "$LOG_DIR/boot-start.log" || warn "No boot start log found."; pause ;;
+      5) return ;;
+      *) error_msg "Invalid option."; pause ;;
+    esac
+  done
+}
+
 install_jellyfin() {
   print_banner
   show_jellyfin_status
@@ -319,12 +375,12 @@ install_jellyfin() {
 
   ensure_base_packages
   yes | pkg install jellyfin-server dotnet9.0 dotnet-sdk-9.0
-  write_service_scripts
+  sync_boot_script_state
 
   echo
   success "Jellyfin installed successfully."
-  warn "It is installed but may not be running yet."
-  warn "Use the start option in the Jellyfin submenu if you want to launch it now."
+  warn "Revert path: use Uninstall Jellyfin from this submenu."
+  warn "If you want it running now, choose Start Jellyfin or Start / Stop Installed Services."
   pause
 }
 
@@ -334,19 +390,19 @@ update_jellyfin() {
 
   if ! jellyfin_installed; then
     error_msg "Jellyfin is not installed."
-    warn "Go back and choose Install Jellyfin first."
+    warn "Install Jellyfin first."
     pause
     return
   fi
 
   info "Updating Jellyfin..."
-  echo
   ensure_base_packages
   yes | pkg install jellyfin-server dotnet9.0 dotnet-sdk-9.0
+  sync_boot_script_state
 
   echo
   success "Jellyfin updated."
-  warn "If something looks broken, you can use Restart Jellyfin from this submenu."
+  warn "Revert path: restart Jellyfin, or uninstall and reinstall if needed."
   pause
 }
 
@@ -362,14 +418,14 @@ start_jellyfin() {
   fi
 
   info "Starting Jellyfin..."
-  pkill -9 -f '/usr/lib/jellyfin/jellyfin' 2>/dev/null || true
-  sleep 1
-
   export PATH="$HOME/.local/bin:$PREFIX/bin:$PATH"
   export DOTNET_ROOT="$PREFIX/lib/dotnet"
   export PATH="$DOTNET_ROOT:$PATH"
   export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
-  nohup jellyfin --ffmpeg "$(command -v ffmpeg)" >/dev/null 2>&1 &
+
+  pkill -9 -f '/usr/lib/jellyfin/jellyfin' 2>/dev/null || true
+  sleep 1
+  nohup jellyfin --ffmpeg "$(command -v ffmpeg)" > "$LOG_DIR/jellyfin.log" 2>&1 &
   sleep 5
 
   print_banner
@@ -378,8 +434,8 @@ start_jellyfin() {
     success "Jellyfin started successfully."
   else
     error_msg "Jellyfin did not start."
-    warn "A common cause is a stale old process or port conflict."
-    warn "Try Restart Jellyfin or uninstall and reinstall from this submenu."
+    warn "Check the Jellyfin log from the logs menu."
+    warn "Revert path: restart Jellyfin, or uninstall and reinstall."
   fi
   pause
 }
@@ -389,7 +445,7 @@ stop_jellyfin() {
   show_jellyfin_status
 
   if ! jellyfin_installed; then
-    error_msg "Jellyfin is not installed."
+    warn "Jellyfin is not installed."
     pause
     return
   fi
@@ -401,7 +457,7 @@ stop_jellyfin() {
   print_banner
   show_jellyfin_status
   success "Jellyfin stop command completed."
-  warn "If it still appears running, wait 2 to 3 seconds and refresh again."
+  warn "If it still appears running, refresh after a few seconds."
   pause
 }
 
@@ -410,7 +466,7 @@ restart_jellyfin() {
   show_jellyfin_status
 
   if ! jellyfin_installed; then
-    error_msg "Jellyfin is not installed."
+    warn "Jellyfin is not installed."
     pause
     return
   fi
@@ -423,7 +479,7 @@ restart_jellyfin() {
   export DOTNET_ROOT="$PREFIX/lib/dotnet"
   export PATH="$DOTNET_ROOT:$PATH"
   export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
-  nohup jellyfin --ffmpeg "$(command -v ffmpeg)" >/dev/null 2>&1 &
+  nohup jellyfin --ffmpeg "$(command -v ffmpeg)" > "$LOG_DIR/jellyfin.log" 2>&1 &
   sleep 5
 
   print_banner
@@ -432,7 +488,7 @@ restart_jellyfin() {
     success "Jellyfin restarted successfully."
   else
     error_msg "Jellyfin restart appears to have failed."
-    warn "You can still uninstall and reinstall from this submenu if needed."
+    warn "Check the Jellyfin log."
   fi
   pause
 }
@@ -447,8 +503,8 @@ uninstall_jellyfin() {
     return
   fi
 
-  echo -e "${YELLOW}This removes Jellyfin and its .NET runtime packages used by this setup.${NC}"
-  echo -e "${YELLOW}You can reinstall later from the Jellyfin submenu.${NC}"
+  echo -e "${YELLOW}This removes Jellyfin and its .NET packages used by this setup.${NC}"
+  echo -e "${YELLOW}Revert path: reinstall from this submenu later.${NC}"
   echo
   read -r -p "$(echo -e "${MAGENTA}Type REMOVE to uninstall Jellyfin: ${NC}")" confirm
   [ "$confirm" != "REMOVE" ] && { warn "Cancelled."; pause; return; }
@@ -461,12 +517,12 @@ uninstall_jellyfin() {
   yes | pkg uninstall jellyfin-server dotnet9.0 dotnet-sdk-9.0 >/dev/null 2>&1 || true
   yes | pkg autoremove >/dev/null 2>&1 || true
   hash -r
+  sync_boot_script_state
   sleep 2
 
   print_banner
   show_jellyfin_status
   success "Jellyfin uninstall complete."
-  warn "You can reinstall it anytime from the Jellyfin submenu."
   pause
 }
 
@@ -477,8 +533,7 @@ configure_jellyfin() {
   echo -e "${WHITE}FFmpeg binary:${NC} ${YELLOW}$(command -v ffmpeg 2>/dev/null || echo not-found)${NC}"
   echo -e "${WHITE}DOTNET_ROOT:${NC}  ${YELLOW}$PREFIX/lib/dotnet${NC}"
   echo
-  warn "Jellyfin port changes are not exposed in this script yet."
-  warn "It currently uses Jellyfin's default port unless you manually reconfigure Jellyfin."
+  warn "Jellyfin port changes are not exposed in this script."
   warn "Safe revert path: uninstall Jellyfin here, then reinstall it cleanly."
   pause
 }
@@ -491,12 +546,12 @@ install_copyparty() {
 
   ensure_base_packages
   python -m pip install --user -U copyparty pillow
-  write_service_scripts
+  sync_boot_script_state
 
   echo
   success "Copyparty installed successfully."
-  warn "It is installed but may not be running yet."
-  warn "Use the start option in the Copyparty submenu if you want to launch it now."
+  warn "Revert path: use Uninstall Copyparty from this submenu."
+  warn "If you want it running now, choose Start Copyparty or Start / Stop Installed Services."
   pause
 }
 
@@ -506,19 +561,19 @@ update_copyparty() {
 
   if ! copyparty_installed; then
     error_msg "Copyparty is not installed."
-    warn "Go back and choose Install Copyparty first."
+    warn "Install Copyparty first."
     pause
     return
   fi
 
   info "Updating Copyparty..."
-  echo
   ensure_base_packages
   python -m pip install --user -U copyparty pillow
+  sync_boot_script_state
 
   echo
   success "Copyparty updated."
-  warn "If something looks wrong, use Restart Copyparty from this submenu."
+  warn "Revert path: restart Copyparty, or uninstall and reinstall if needed."
   pause
 }
 
@@ -534,16 +589,16 @@ start_copyparty() {
   fi
 
   info "Starting Copyparty..."
+  export PATH="$HOME/.local/bin:$PREFIX/bin:$PATH"
+
   pkill -9 -f 'python.*copyparty|copyparty' 2>/dev/null || true
   sleep 2
-
-  export PATH="$HOME/.local/bin:$PREFIX/bin:$PATH"
   nohup python -m copyparty \
     -p "$DEFAULT_COPYPARTY_PORT" \
     -v "$COPYPARTY_VOLUME" \
     -a "$COPYPARTY_USER:$COPYPARTY_PASS" \
     -e2dsa \
-    >/dev/null 2>&1 &
+    > "$LOG_DIR/copyparty.log" 2>&1 &
   sleep 5
 
   print_banner
@@ -552,7 +607,7 @@ start_copyparty() {
     success "Copyparty started successfully."
   else
     error_msg "Copyparty did not start."
-    warn "Try Restart Copyparty. If needed, uninstall and reinstall from this submenu."
+    warn "Check the Copyparty log from the logs menu."
   fi
   pause
 }
@@ -562,7 +617,7 @@ stop_copyparty() {
   show_copyparty_status
 
   if ! copyparty_installed; then
-    error_msg "Copyparty is not installed."
+    warn "Copyparty is not installed."
     pause
     return
   fi
@@ -574,7 +629,7 @@ stop_copyparty() {
   print_banner
   show_copyparty_status
   success "Copyparty stop command completed."
-  warn "If it still appears running, wait 2 to 3 seconds and refresh again."
+  warn "If it still appears running, refresh after a few seconds."
   pause
 }
 
@@ -583,7 +638,7 @@ restart_copyparty() {
   show_copyparty_status
 
   if ! copyparty_installed; then
-    error_msg "Copyparty is not installed."
+    warn "Copyparty is not installed."
     pause
     return
   fi
@@ -598,7 +653,7 @@ restart_copyparty() {
     -v "$COPYPARTY_VOLUME" \
     -a "$COPYPARTY_USER:$COPYPARTY_PASS" \
     -e2dsa \
-    >/dev/null 2>&1 &
+    > "$LOG_DIR/copyparty.log" 2>&1 &
   sleep 5
 
   print_banner
@@ -607,7 +662,7 @@ restart_copyparty() {
     success "Copyparty restarted successfully."
   else
     error_msg "Copyparty restart appears to have failed."
-    warn "You can still uninstall and reinstall from this submenu if needed."
+    warn "Check the Copyparty log."
   fi
   pause
 }
@@ -623,7 +678,8 @@ uninstall_copyparty() {
   fi
 
   echo -e "${YELLOW}This removes Copyparty and Pillow installed by this setup.${NC}"
-  echo -e "${YELLOW}Your media files themselves are not deleted.${NC}"
+  echo -e "${YELLOW}Your actual media files are not deleted.${NC}"
+  echo -e "${YELLOW}Revert path: reinstall from this submenu later.${NC}"
   echo
   read -r -p "$(echo -e "${MAGENTA}Type REMOVE to uninstall Copyparty: ${NC}")" confirm
   [ "$confirm" != "REMOVE" ] && { warn "Cancelled."; pause; return; }
@@ -635,12 +691,12 @@ uninstall_copyparty() {
   info "Uninstalling Copyparty..."
   python -m pip uninstall -y copyparty pillow >/dev/null 2>&1 || true
   hash -r
+  sync_boot_script_state
   sleep 2
 
   print_banner
   show_copyparty_status
   success "Copyparty uninstall complete."
-  warn "You can reinstall it anytime from the Copyparty submenu."
   pause
 }
 
@@ -654,24 +710,24 @@ configure_copyparty() {
   echo -e "${WHITE}Current volume:${NC}   ${YELLOW}$COPYPARTY_VOLUME${NC}"
   echo
   warn "Changing settings here does not delete files."
-  warn "If you enter something wrong, reopen this screen and fix it."
-  warn "For a full reset, uninstall and reinstall Copyparty from this submenu."
+  warn "If you enter something wrong, come back here and fix it."
+  warn "For a full reset, uninstall and reinstall Copyparty."
   echo
 
-  read -r -p "$(echo -e "${MAGENTA}New username [blank keeps current]: ${NC}")" NEW_USER
-  read -r -p "$(echo -e "${MAGENTA}New password [blank keeps current]: ${NC}")" NEW_PASS
-  read -r -p "$(echo -e "${MAGENTA}New volume mapping [blank keeps current]: ${NC}")" NEW_VOL
+  read -r -p "$(echo -e "${MAGENTA}New username [blank keeps current]: ${NC}")" new_user
+  read -r -p "$(echo -e "${MAGENTA}New password [blank keeps current]: ${NC}")" new_pass
+  read -r -p "$(echo -e "${MAGENTA}New volume mapping [blank keeps current]: ${NC}")" new_vol
 
-  [ -n "$NEW_USER" ] && COPYPARTY_USER="$NEW_USER"
-  [ -n "$NEW_PASS" ] && COPYPARTY_PASS="$NEW_PASS"
-  [ -n "$NEW_VOL" ] && COPYPARTY_VOLUME="$NEW_VOL"
+  [ -n "$new_user" ] && COPYPARTY_USER="$new_user"
+  [ -n "$new_pass" ] && COPYPARTY_PASS="$new_pass"
+  [ -n "$new_vol" ] && COPYPARTY_VOLUME="$new_vol"
 
   save_config
-  write_service_scripts
+  sync_boot_script_state
 
   echo
   success "Copyparty settings saved."
-  warn "Restart Copyparty from this submenu for changes to fully apply."
+  warn "Restart Copyparty for changes to fully apply."
   pause
 }
 
@@ -679,22 +735,22 @@ enable_background_autostart() {
   print_banner
   echo -e "${CYAN}----------- Background Autostart Settings ---------${NC}"
   echo
-  warn "This enables background startup using Termux:Boot."
-  warn "Required steps:"
+  warn "This creates the Termux:Boot start-services boot script."
+  warn "Required steps for boot-time startup:"
   echo -e "${WHITE}1.${NC} Install ${CYAN}Termux:Boot${NC}"
   echo -e "${WHITE}2.${NC} Open ${CYAN}Termux:Boot${NC} once"
   echo
   read -r -p "$(echo -e "${MAGENTA}Type ENABLE to continue: ${NC}")" confirm
   [ "$confirm" != "ENABLE" ] && { warn "Cancelled."; pause; return; }
 
-  write_service_scripts
   AUTOSTART_ENABLED=1
   save_config
+  sync_boot_script_state
 
   echo
   success "Background autostart enabled."
   echo -e "${WHITE}Boot script path:${NC} ${CYAN}$BOOT_SCRIPT${NC}"
-  warn "Revert path: open this submenu again and choose Disable Background Autostart."
+  warn "Revert path: use Disable Background Autostart from this submenu."
   pause
 }
 
@@ -702,22 +758,43 @@ disable_background_autostart() {
   print_banner
   echo -e "${CYAN}----------- Background Autostart Settings ---------${NC}"
   echo
-  warn "This disables boot-time background startup."
-  warn "Your services can still be started manually anytime."
+  warn "This deletes the Termux:Boot start-services boot script."
+  warn "Manual starts from the menu will still work."
   echo
   read -r -p "$(echo -e "${MAGENTA}Type DISABLE to continue: ${NC}")" confirm
   [ "$confirm" != "DISABLE" ] && { warn "Cancelled."; pause; return; }
 
   AUTOSTART_ENABLED=0
   save_config
-
-  if [ -f "$BOOT_SCRIPT" ]; then
-    rm -f "$BOOT_SCRIPT"
-  fi
+  sync_boot_script_state
 
   echo
   success "Background autostart disabled."
-  warn "Revert path: come back here and enable it again."
+  warn "Revert path: enable it again from this submenu."
+  pause
+}
+
+rebuild_service_scripts() {
+  print_banner
+  echo -e "${CYAN}---------------- Script Maintenance ----------------${NC}"
+  echo
+  warn "This recreates the runtime start/stop scripts and updates or removes the boot script based on current settings."
+  warn "Use this if something was manually edited or deleted."
+  echo
+  read -r -p "$(echo -e "${MAGENTA}Type REBUILD to continue: ${NC}")" confirm
+  [ "$confirm" != "REBUILD" ] && { warn "Cancelled."; pause; return; }
+
+  sync_boot_script_state
+
+  echo
+  success "Service scripts rebuilt successfully."
+  echo -e "${WHITE}Runtime start script:${NC} ${CYAN}$START_SCRIPT${NC}"
+  echo -e "${WHITE}Runtime stop script:${NC}  ${CYAN}$STOP_SCRIPT${NC}"
+  if [ "$AUTOSTART_ENABLED" = "1" ] && [ -f "$BOOT_SCRIPT" ]; then
+    echo -e "${WHITE}Boot script:${NC}          ${CYAN}$BOOT_SCRIPT${NC}"
+  else
+    echo -e "${WHITE}Boot script:${NC}          ${DIM}Not present because autostart is disabled${NC}"
+  fi
   pause
 }
 
@@ -726,7 +803,7 @@ restart_all_services() {
   show_main_status
 
   warn "This restarts all installed services managed by this script."
-  warn "Useful if status looks stale or after changing settings."
+  warn "Useful after changing settings or if status looks stale."
   echo
   read -r -p "$(echo -e "${MAGENTA}Type RESTART to continue: ${NC}")" confirm
   [ "$confirm" != "RESTART" ] && { warn "Cancelled."; pause; return; }
@@ -737,6 +814,7 @@ restart_all_services() {
   print_banner
   show_main_status
   success "Installed services restarted."
+  warn "If something still failed to start, check the logs menu."
   pause
 }
 
@@ -748,12 +826,13 @@ toggle_main_services() {
     warn "One or more services are currently running."
     read -r -p "$(echo -e "${MAGENTA}Type STOP to stop all running services: ${NC}")" confirm
     [ "$confirm" != "STOP" ] && { warn "Cancelled."; pause; return; }
+
     stop_all_services
 
     print_banner
     show_main_status
     success "Running services stopped."
-    warn "Revert path: use Start/Stop Services again to start installed services."
+    warn "Revert path: use this same option again to start installed services."
   else
     warn "No managed services are currently running."
     read -r -p "$(echo -e "${MAGENTA}Type START to launch all installed services: ${NC}")" confirm
@@ -770,8 +849,8 @@ toggle_main_services() {
 
     print_banner
     show_main_status
-    success "Installed services started."
-    warn "Revert path: use this same option again to stop them."
+    success "Installed services start command sent."
+    warn "If a service is still not running, check the logs menu."
   fi
 
   pause
@@ -781,7 +860,7 @@ clean_uninstall_all() {
   print_banner
   show_main_status
 
-  error_msg "This will remove Jellyfin, Copyparty, related packages, config, and boot scripts."
+  error_msg "This will remove Jellyfin, Copyparty, related packages, config, logs, runtime scripts, and the boot script."
   warn "Your actual media files are not deleted by this script."
   warn "Helper packages like ffmpeg, curl, net-tools, termux-api, iproute2, procps, and nano will also be removed."
   warn "Revert path: rerun this script later and reinstall what you need."
@@ -805,9 +884,9 @@ clean_uninstall_all() {
   info "Removing helper packages installed by this setup..."
   yes | pkg uninstall termux-api net-tools iproute2 procps nano curl >/dev/null 2>&1 || true
 
-  info "Removing config and boot files..."
-  rm -f "$BOOT_SCRIPT" "$STOP_SCRIPT"
-  rm -rf "$CONFIG_DIR"
+  info "Removing config, logs, runtime scripts, and boot script..."
+  rm -f "$START_SCRIPT" "$STOP_SCRIPT" "$BOOT_SCRIPT"
+  rm -rf "$APP_DIR"
 
   echo
   success "Clean uninstall complete."
@@ -878,18 +957,19 @@ background_menu() {
     print_banner
     echo -e "${CYAN}--------- Background Services / Autostart ---------${NC}"
     echo
-    if [ "$AUTOSTART_ENABLED" = "1" ]; then
+    if [ "$AUTOSTART_ENABLED" = "1" ] && [ -f "$BOOT_SCRIPT" ]; then
       echo -e "${WHITE}Current status:${NC} ${GREEN}ENABLED${NC}"
       echo -e "${WHITE}Boot script:${NC}    ${CYAN}$BOOT_SCRIPT${NC}"
     else
       echo -e "${WHITE}Current status:${NC} ${RED}DISABLED${NC}"
-      echo -e "${WHITE}Boot script:${NC}    ${DIM}Not active${NC}"
+      echo -e "${WHITE}Boot script:${NC}    ${DIM}Not present${NC}"
     fi
     echo
     echo -e "${CYAN}1)${NC} Enable Background Autostart"
     echo -e "${CYAN}2)${NC} Disable Background Autostart"
     echo -e "${CYAN}3)${NC} Restart All Installed Services Now"
-    echo -e "${CYAN}4)${NC} Back"
+    echo -e "${CYAN}4)${NC} Rebuild Start/Stop/Boot Scripts"
+    echo -e "${CYAN}5)${NC} Back"
     echo
     read -r -p "$(echo -e "${MAGENTA}Select option: ${NC}")" choice
 
@@ -897,14 +977,15 @@ background_menu() {
       1) enable_background_autostart ;;
       2) disable_background_autostart ;;
       3) restart_all_services ;;
-      4) return ;;
+      4) rebuild_service_scripts ;;
+      5) return ;;
       *) error_msg "Invalid option."; pause ;;
     esac
   done
 }
 
 main_menu() {
-  write_service_scripts
+  sync_boot_script_state
 
   while true; do
     print_banner
@@ -913,9 +994,10 @@ main_menu() {
     echo -e "${CYAN}2)${NC} Jellyfin Menu"
     echo -e "${CYAN}3)${NC} Copyparty Menu"
     echo -e "${CYAN}4)${NC} Background Services Menu"
-    echo -e "${CYAN}5)${NC} Clean Uninstall All"
-    echo -e "${CYAN}6)${NC} Refresh Status"
-    echo -e "${CYAN}7)${NC} Exit"
+    echo -e "${CYAN}5)${NC} View Logs"
+    echo -e "${CYAN}6)${NC} Clean Uninstall All"
+    echo -e "${CYAN}7)${NC} Refresh Status"
+    echo -e "${CYAN}8)${NC} Exit"
     echo
     read -r -p "$(echo -e "${MAGENTA}Select option: ${NC}")" choice
 
@@ -924,9 +1006,10 @@ main_menu() {
       2) jellyfin_menu ;;
       3) copyparty_menu ;;
       4) background_menu ;;
-      5) clean_uninstall_all ;;
-      6) ;;
-      7) exit 0 ;;
+      5) show_logs_menu ;;
+      6) clean_uninstall_all ;;
+      7) ;;
+      8) exit 0 ;;
       *) error_msg "Invalid option."; pause ;;
     esac
   done
