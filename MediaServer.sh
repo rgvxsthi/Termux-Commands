@@ -80,7 +80,7 @@ get_ip() {
 }
 
 pkg_installed() {
-  dpkg -s "$1" >/dev/null 2>&1
+  dpkg-query -W -f='${db:Status-Status}\n' "$1" 2>/dev/null | grep -qx installed
 }
 
 pip_pkg_installed() {
@@ -120,10 +120,6 @@ jellyfin_installed() {
 
 copyparty_installed() {
   pip_pkg_installed copyparty
-}
-
-service_scripts_exist() {
-  [ -f "$BOOT_SCRIPT" ] && [ -f "$STOP_SCRIPT" ]
 }
 
 ensure_path_local_bin() {
@@ -174,7 +170,7 @@ pkill -9 -f '/usr/lib/jellyfin/jellyfin' 2>/dev/null || true
 pkill -9 -f 'python.*copyparty|copyparty' 2>/dev/null || true
 sleep 2
 
-if dpkg -s jellyfin-server >/dev/null 2>&1; then
+if dpkg-query -W -f='\\\${db:Status-Status}\\n' jellyfin-server 2>/dev/null | grep -qx installed; then
   nohup jellyfin --ffmpeg "\$(command -v ffmpeg)" >/dev/null 2>&1 &
 fi
 
@@ -366,10 +362,9 @@ start_jellyfin() {
   fi
 
   info "Starting Jellyfin..."
-  stop_all_services
+  pkill -9 -f '/usr/lib/jellyfin/jellyfin' 2>/dev/null || true
   sleep 1
 
-  # Start Jellyfin only
   export PATH="$HOME/.local/bin:$PREFIX/bin:$PATH"
   export DOTNET_ROOT="$PREFIX/lib/dotnet"
   export PATH="$DOTNET_ROOT:$PATH"
@@ -384,7 +379,7 @@ start_jellyfin() {
   else
     error_msg "Jellyfin did not start."
     warn "A common cause is a stale old process or port conflict."
-    warn "Try Restart Jellyfin or go back and run the full service restart from the main menu."
+    warn "Try Restart Jellyfin or uninstall and reinstall from this submenu."
   fi
   pause
 }
@@ -464,6 +459,8 @@ uninstall_jellyfin() {
 
   info "Uninstalling Jellyfin..."
   yes | pkg uninstall jellyfin-server dotnet9.0 dotnet-sdk-9.0 >/dev/null 2>&1 || true
+  yes | pkg autoremove >/dev/null 2>&1 || true
+  hash -r
   sleep 2
 
   print_banner
@@ -637,6 +634,7 @@ uninstall_copyparty() {
 
   info "Uninstalling Copyparty..."
   python -m pip uninstall -y copyparty pillow >/dev/null 2>&1 || true
+  hash -r
   sleep 2
 
   print_banner
@@ -801,6 +799,8 @@ clean_uninstall_all() {
 
   info "Removing Jellyfin and .NET packages..."
   yes | pkg uninstall jellyfin-server dotnet9.0 dotnet-sdk-9.0 ffmpeg >/dev/null 2>&1 || true
+  yes | pkg autoremove >/dev/null 2>&1 || true
+  hash -r
 
   info "Removing helper packages installed by this setup..."
   yes | pkg uninstall termux-api net-tools iproute2 procps nano curl >/dev/null 2>&1 || true
